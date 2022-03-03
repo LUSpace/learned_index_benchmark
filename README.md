@@ -8,6 +8,7 @@ GRE is a benchmark suite for learned indexes and traditional indexes to measure 
 - intel-mkl 2018.4.274
 - intel-tbb 2020.3
 - jemalloc
+- (Optional) numactl
 
 ## Build
 ```

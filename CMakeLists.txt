@@ -6,15 +6,10 @@ include(FetchContent)
 include(ExternalProject)
 
 find_package(OpenMP)
-# find_package(GTest CONFIG REQUIRED)
 find_package(MKL REQUIRED)
 find_package(JeMalloc REQUIRED)
 find_package(TBB REQUIRED)
-# find_package(Gperftools REQUIRED)
-# find_package(pmem REQUIRED)
-
-# add_definitions(-DPMEM)
-# add_definitions(-DPMDK)
+find_package(numactl)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -59,7 +54,7 @@ include_directories(${MKL_INCLUDE_DIRS})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${TBB_INCLUDE_DIRS})
 include_directories(${JEMALLOC_INCLUDE_DIR})
-# include_directories(${Gperftools_INCLUDE_DIRS})
+include_directories(${NUMACTL_INCLUDE_DIRS})
 include_directories(src/competitor)
 include_directories(src/competitor/hot/src/hot/commons/include)
 include_directories(src/competitor/hot/src/hot/rowex/include)
@@ -88,8 +83,6 @@ else()
     message(STATUS "Setting build type to '${default_build_type}' ")
 endif()
 
-#list(APPEND libs_to_link ${pmem_LIBRARIES})
-
 
 target_link_libraries(microbench
         PRIVATE
@@ -101,8 +94,7 @@ target_link_libraries(microbench
         -lpthread
         ${JEMALLOC_LIBRARIES}
         ${TBB_LIBRARIES}
-        # ${Gperftools_LIBRARIES}
-# ${libs_to_link}
+        ${NUMACTL_LIBRARIES}
 )
 
 target_link_libraries(microbench PUBLIC OpenMP::OpenMP_CXX)
