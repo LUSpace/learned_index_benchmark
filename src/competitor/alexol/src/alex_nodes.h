@@ -1580,7 +1580,8 @@ public:
 
   bool find_payload(const T &key, P *payload, bool *found) {
     uint32_t version;
-    if (test_lock_set(version)) // Test whether the lock is set and record the version
+    if (test_lock_set(
+            version)) // Test whether the lock is set and record the version
       return false;
     num_lookups_++;
     int predicted_pos = predict_position(key);
@@ -1593,8 +1594,29 @@ public:
     } else {
       *found = false;
     }
-    if (test_lock_version_change(version)) // Test whether the version is changed or not
+    if (test_lock_version_change(
+            version)) // Test whether the version is changed or not
       return false;
+    return true;
+  }
+
+  bool update(const T &key, const P &payload, bool *updated) {
+    if (!try_get_lock()) {
+      return false;
+    }
+    num_lookups_++;
+    int predicted_pos = predict_position(key);
+    // The last key slot with a certain value is guaranteed to be a real key
+    // (instead of a gap)
+    int pos = exponential_search_upper_bound(predicted_pos, key) - 1;
+    if (!(pos < 0 || !key_equal(ALEX_DATA_NODE_KEY_AT(pos), key))) {
+      ALEX_DATA_NODE_PAYLOAD_AT(pos) = payload;
+      *updated = true;
+    } else {
+      *updated = false;
+    }
+
+    release_lock();
     return true;
   }
 
