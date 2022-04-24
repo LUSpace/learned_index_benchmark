@@ -2620,10 +2620,24 @@ public:
   }
 
   // Erases all keys with a certain key value
+  // Make it concurrent
   int erase(const T &key) {
-    data_node_type *leaf = get_leaf(key);
-    int num_erased = leaf->erase(key);
-    stats_.num_keys -= num_erased;
+    EpochGuard guard;
+    int num_erased = 0;
+    do {
+      data_node_type *leaf = get_leaf(key);
+      auto ret_flag = leaf->erase(key, num_erased);
+      if (ret_flag == true)
+        break; // ret_flag == true means no concurrency conlict occurs
+    } while (true);
+
+    thread_local int erase_counter(0);
+    int old_counter = erase_counter;
+    erase_counter = (erase_counter + num_erased) & counterMask;
+    if(old_counter > erase_counter){
+      SUB(&stats_.num_keys, (1 << 19) - 1);
+    }
+
     if (key > istats_.key_domain_max_) {
       istats_.num_keys_above_key_domain -= num_erased;
     } else if (key < istats_.key_domain_min_) {

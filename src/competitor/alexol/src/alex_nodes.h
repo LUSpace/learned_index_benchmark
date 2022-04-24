@@ -2487,11 +2487,17 @@ public:
   // Erase all keys with the input value
   // Returns the number of keys erased (there may be multiple keys with the same
   // value)
-  int erase(const T &key) {
+  bool erase(const T &key, int &count) {
+    if (!try_get_lock()) {
+      return false;
+    }
     int pos = upper_bound(key);
 
-    if (pos == 0 || !key_equal(ALEX_DATA_NODE_KEY_AT(pos - 1), key))
-      return 0;
+    if (pos == 0 || !key_equal(ALEX_DATA_NODE_KEY_AT(pos - 1), key)){
+      count = 0;
+      release_lock();
+      return true;
+    }
 
     // Erase preceding positions until we reach a key with smaller value
     int num_erased = 0;
@@ -2511,11 +2517,16 @@ public:
 
     num_keys_ -= num_erased;
 
-    if (num_keys_ < contraction_threshold_) {
-      resize(kMaxDensity_); // contract
-      num_resizes_++;
-    }
-    return num_erased;
+    // Disable the contraction
+
+    // if (num_keys_ < contraction_threshold_) {
+    //   resize(kMaxDensity_);
+    //   num_resizes_++;
+    // } 
+
+    count = num_erased;
+    release_lock();
+    return true;
   }
 
   // Erase keys with value between start key (inclusive) and end key.
