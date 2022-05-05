@@ -2364,7 +2364,7 @@ public:
         if (key_greater(key, old_value)) {
           cas_multiple_type(&max_key_, &old_value, key);
         }
-      } while ((key > max_key_);
+      } while (key > max_key_);
       num_right_out_of_bounds_inserts_++; // No need for atomicity
     }
 
