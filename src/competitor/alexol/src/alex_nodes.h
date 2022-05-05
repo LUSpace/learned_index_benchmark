@@ -2959,7 +2959,7 @@ public:
     }
   }
 
-  int closest_gap_with_lock(int pos, int& left, int& right, bool& success) const {
+  int closest_gap_with_lock(int pos, int& left, int& right, bool& success) {
     pos = std::min(pos, data_capacity_ - 1);
     int bitmap_pos = pos >> 6;
     int bit_pos = pos - (bitmap_pos << 6);
