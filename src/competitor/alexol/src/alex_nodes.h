@@ -1955,7 +1955,7 @@ public:
     }
 
     if(right_lock_pos > right_lock){
-      for(int i = right_lock + 1, i <= right_lock_pos; i++){
+      for(int i = right_lock + 1; i <= right_lock_pos; i++){
         if(!try_get_lock(i)){
           right_lock = i - 1;
           return false;
