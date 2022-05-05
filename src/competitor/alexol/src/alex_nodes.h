@@ -2389,7 +2389,7 @@ public:
     }
 
     // Check if node is full (based on expansion_threshold)
-    if scale_parameters_[parameter_pos].num_keys_ >= scale_parameters_[parameter_pos].expansion_threshold_) {
+    if (scale_parameters_[parameter_pos].num_keys_ >= scale_parameters_[parameter_pos].expansion_threshold_) {
       int total_keys = total_keys_in_node();
       if ((total_keys > expansion_threshold_) && try_get_lock()) {
         release_seq_lock(left_lock, right_lock);
