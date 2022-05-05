@@ -1409,7 +1409,7 @@ public:
 #endif
           set_bit(pos);
           parameter_pos = pos / SCALE_FACTOR;
-          scale_parameters[parameter_pos].num_keys_++;
+          scale_parameters_[parameter_pos].num_keys_++;
           pos++;
         }
         last_position = pos - 1;
