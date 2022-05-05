@@ -2086,7 +2086,7 @@ public:
       l = m + bound / 2;
       r = m + std::min<int>(bound, size);
     }
-    return binary_search_upper_bound(l, r, key, cur_parameter_pos, version, lock_success);
+    return binary_search_upper_bound_with_opt_read(l, r, key, cur_parameter_pos, version, lock_success);
   }
 
   // Searches for the first position greater than key in range [l, r)
