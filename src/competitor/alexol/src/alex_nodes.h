@@ -1520,7 +1520,7 @@ public:
 
       int positions_remaining = data_capacity_ - position;
       if (positions_remaining < keys_remaining) {
-        scale_parameters[parameter_pos].num_keys_--;
+        scale_parameters_[parameter_pos].num_keys_--;
         // fill the rest of the store contiguously
         int pos = data_capacity_ - keys_remaining;
         for (int j = last_position + 1; j < pos; j++) {
@@ -1535,7 +1535,7 @@ public:
 #endif
           set_bit(pos);
           parameter_pos = pos / SCALE_FACTOR;
-          scale_parameters[parameter_pos].num_keys_++;
+          scale_parameters_[parameter_pos].num_keys_++;
         }
         last_position = pos - 1;
         break;
@@ -1744,8 +1744,8 @@ public:
     }
     if(test_lock_set(version, cur_parameter_pos))
       return false;
-    scale_parameters[cur_parameter_pos].num_lookups_++;
-    scale_parameters[cur_parameter_pos].num_exp_search_iterations_ += cur_exp_search_iterations;
+    scale_parameters_[cur_parameter_pos].num_lookups_++;
+    scale_parameters_[cur_parameter_pos].num_exp_search_iterations_ += cur_exp_search_iterations;
     return true;
   }
 
