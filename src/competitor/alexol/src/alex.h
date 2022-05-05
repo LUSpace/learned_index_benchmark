@@ -1838,89 +1838,92 @@ public:
         release_link_locks_for_resizing(node);
 
         safe_delete_node(leaf);
-        return true;
-      }
-
-      std::vector<fanout_tree::FTNode> used_fanout_tree_nodes;
-      int fanout_tree_depth = 1;
-      if (experimental_params_.splitting_policy_method == 0 || fail >= 2) {
-        // always split in 2. No extra work required here
-      } else if (experimental_params_.splitting_policy_method == 1) {
-        // decide between no split (i.e., expand and retrain) or splitting in
-        // 2
-        fanout_tree_depth =
-            fanout_tree::find_best_fanout_existing_node_without_parent<T, P>(
-                leaf, stats_.num_keys, used_fanout_tree_nodes, 2);
-      } else if (experimental_params_.splitting_policy_method == 2) {
-        // use full fanout tree to decide fanout
-        fanout_tree_depth =
-            fanout_tree::find_best_fanout_existing_node_without_parent<T, P>(
-                leaf, stats_.num_keys, used_fanout_tree_nodes,
-                derived_params_.max_fanout);
-      }
-
-      if (fanout_tree_depth == 0) {
-        // std::cout << "DN expansion with node retraining, key = " << key <<
-        // std::endl;
-        // 1. Allocate new node
-        data_node_type *node;
-        data_node_type::New_from_existing(reinterpret_cast<void **>(&node),
-                                          leaf);
-
-        // 2. Rehash from old node to new node
-        bool keep_left = leaf->is_append_mostly_right();
-        bool keep_right = leaf->is_append_mostly_left();
-        node->resize_from_existing(leaf, data_node_type::kMinDensity_, true,
-                                   keep_left, keep_right);
-
-        fanout_tree::FTNode &tree_node = used_fanout_tree_nodes[0];
-        leaf->cost_ = tree_node.cost;
-        leaf->expected_avg_exp_search_iterations_ =
-            tree_node.expected_avg_search_iterations;
-        leaf->expected_avg_shifts_ = tree_node.expected_avg_shifts;
-        leaf->reset_stats();
-
-        // 3. Update parent node
-        std::vector<TraversalNode> traversal_path;
-        while (!lock_parent_node(key, &traversal_path, leaf, false)) {
-          traversal_path.clear();
+      }else{
+        std::vector<fanout_tree::FTNode> used_fanout_tree_nodes;
+        int fanout_tree_depth = 1;
+        if (experimental_params_.splitting_policy_method == 0 || fail >= 2) {
+          // always split in 2. No extra work required here
+        } else if (experimental_params_.splitting_policy_method == 1) {
+          // decide between no split (i.e., expand and retrain) or splitting in
+          // 2
+          fanout_tree_depth =
+              fanout_tree::find_best_fanout_existing_node_without_parent<T, P>(
+                  leaf, stats_.num_keys, used_fanout_tree_nodes, 2);
+        } else if (experimental_params_.splitting_policy_method == 2) {
+          // use full fanout tree to decide fanout
+          fanout_tree_depth =
+              fanout_tree::find_best_fanout_existing_node_without_parent<T, P>(
+                  leaf, stats_.num_keys, used_fanout_tree_nodes,
+                  derived_params_.max_fanout);
         }
 
-        model_node_type *parent = traversal_path.back().node;
-        int bucketID = traversal_path.back().bucketID;
-        int repeats =
-            1 << (log_2_round_down(parent->num_children_) - leaf->local_depth_);
-        int start_bucketID =
-            bucketID - (bucketID % repeats); // first bucket with same child
-        int end_bucketID =
-            start_bucketID + repeats; // first bucket with different child
-        for (int i = start_bucketID; i < end_bucketID; i++) {
-          parent->children_[i] = node;
-        }
+        if (fanout_tree_depth == 0) {
+          // std::cout << "DN expansion with node retraining, key = " << key <<
+          // std::endl;
+          // 1. Allocate new node
+          data_node_type *node;
+          data_node_type::New_from_existing(reinterpret_cast<void **>(&node),
+                                            leaf);
 
-        // 4. Link to sibling node (Need redo upon reocvery)
-        link_resizing_data_nodes(leaf, node);
+          // 2. Rehash from old node to new node
+          bool keep_left = leaf->is_append_mostly_right();
+          bool keep_right = leaf->is_append_mostly_left();
+          node->resize_from_existing(leaf, data_node_type::kMinDensity_, true,
+                                    keep_left, keep_right);
 
-        node->release_lock();
-        parent->release_read_lock();
+          fanout_tree::FTNode &tree_node = used_fanout_tree_nodes[0];
+          leaf->cost_ = tree_node.cost;
+          leaf->expected_avg_exp_search_iterations_ =
+              tree_node.expected_avg_search_iterations;
+          leaf->expected_avg_shifts_ = tree_node.expected_avg_shifts;
+          leaf->reset_stats();
 
-        release_link_locks_for_resizing(node);
+          // 3. Update parent node
+          std::vector<TraversalNode> traversal_path;
+          while (!lock_parent_node(key, &traversal_path, leaf, false)) {
+            traversal_path.clear();
+          }
 
-        safe_delete_node(leaf);
-      } else {
-        // std::cout << "DN split with node retraining, key = " << key <<
-        // std::endl; split data node: always try to split sideways/upwards,
-        // only split downwards if necessary
-        bool reuse_model = (fail == 3);
-        if (experimental_params_.allow_splitting_upwards) {
-          // allow splitting upwards
-          // To-DO
+          model_node_type *parent = traversal_path.back().node;
+          int bucketID = traversal_path.back().bucketID;
+          int repeats =
+              1 << (log_2_round_down(parent->num_children_) - leaf->local_depth_);
+          int start_bucketID =
+              bucketID - (bucketID % repeats); // first bucket with same child
+          int end_bucketID =
+              start_bucketID + repeats; // first bucket with different child
+          for (int i = start_bucketID; i < end_bucketID; i++) {
+            parent->children_[i] = node;
+          }
+
+          // 4. Link to sibling node (Need redo upon reocvery)
+          link_resizing_data_nodes(leaf, node);
+
+          node->release_lock();
+          parent->release_read_lock();
+
+          release_link_locks_for_resizing(node);
+
+          safe_delete_node(leaf);
         } else {
-          // either split sideways or downwards
-          split_sideways_downwards_without_parent(leaf, fanout_tree_depth,
-                                                  used_fanout_tree_nodes,
-                                                  reuse_model, key);
+          // std::cout << "DN split with node retraining, key = " << key <<
+          // std::endl; split data node: always try to split sideways/upwards,
+          // only split downwards if necessary
+          bool reuse_model = (fail == 3);
+          if (experimental_params_.allow_splitting_upwards) {
+            // allow splitting upwards
+            // To-DO
+          } else {
+            // either split sideways or downwards
+            split_sideways_downwards_without_parent(leaf, fanout_tree_depth,
+                                                    used_fanout_tree_nodes,
+                                                    reuse_model, key);
+          }
         }
+      }
+
+      if(insert_pos == -2) {
+        goto RETRY;
       }
     }
     // stats_.num_inserts++;

@@ -30,6 +30,9 @@
 // pre-Haswell), set this to 0.
 #define ALEX_USE_LZCNT 1
 
+#define SCALE_FACTOR 256
+
+
 namespace alexol {
 
 // A parent class for both types of ALEX nodes
@@ -325,6 +328,17 @@ template <class T, class P, class Compare = AlexCompare,
           bool allow_duplicates = false>
 class AlexDataNode : public AlexNode<T, P> {
 public:
+  class ScaleParameter {
+  public:
+    int num_keys_ = 0;
+    int num_lookups_ = 0;
+    int num_inserts_ = 0;
+    int lock_ = 0; // 16B
+    long long num_shifts_ = 0;
+    long long num_exp_search_iterations_ = 0; // 32B
+    double expansion_threshold_ = 0; // 40B
+    char dummy[24];
+  };
   typedef std::pair<T, P> V;
   typedef AlexDataNode<T, P, Compare, Alloc, allow_duplicates> self_type;
   typedef typename Alloc::template rebind<self_type>::other alloc_type;
@@ -343,8 +357,14 @@ public:
   typedef Iterator<> iterator_type;
   typedef Iterator<const self_type, const P, const V> const_iterator_type;
 
+  // To scale on multi-core, we partition these metadata for every SCALE_FACTOR
+  // records 64 bytes
+  
+
   self_type *next_leaf_ = nullptr;
   self_type *prev_leaf_ = nullptr;
+
+  ScaleParameter *scale_parameters_ = nullptr;
 
 #if ALEX_DATA_NODE_SEP_ARRAYS
   T *key_slots_ = nullptr;     // holds keys
@@ -364,6 +384,7 @@ public:
   // bit)
   uint64_t *bitmap_ = nullptr;
   int bitmap_size_ = 0; // number of int64_t in bitmap
+  int scale_parameters_size_ = 0; // number of parameters
 
   // Variables related to resizing (expansions and contractions)
   static constexpr double kMaxDensity_ = 0.8; // density after contracting,
@@ -440,6 +461,7 @@ public:
     value_allocator().deallocate(data_slots_, data_capacity_);
 #endif
     bitmap_allocator().deallocate(bitmap_, bitmap_size_);
+    free(scale_parameters_);
   }
 
   AlexDataNode(const self_type &other)
@@ -477,6 +499,8 @@ public:
     bitmap_ = new (bitmap_allocator().allocate(other.bitmap_size_))
         uint64_t[other.bitmap_size_];
     std::copy(other.bitmap_, other.bitmap_ + other.bitmap_size_, bitmap_);
+    align_zalloc(reinterpret_cast<void**>(&scale_parameters_), sizeof(ScaleParameter) * other.scale_parameters_size_);
+    std::copy(other.scale_parameters_, other.scale_parameters_ + other.scale_parameters_size_, scale_parameters_);
   }
 
   /*** Allocators ***/
@@ -626,7 +650,8 @@ public:
     return !key_less_(a, b) && !key_less_(b, a);
   }
 
-  /*** concurrency management **/
+  /*** concurrency management in data node **/
+  /*** coarse-grained locking in data node ***/
   inline void get_lock() {
     uint32_t new_value = 0;
     uint32_t old_value = 0;
@@ -658,16 +683,22 @@ public:
   }
 
   /*if the lock is set, return true*/
-  inline bool test_lock_set(uint32_t &version) const {
-    version = __atomic_load_n(&lock_, __ATOMIC_ACQUIRE);
+  // inline bool test_lock_set(uint32_t &version) const {
+  //   version = __atomic_load_n(&lock_, __ATOMIC_ACQUIRE);
+  //   return (version & lockSet) != 0;
+  // }
+
+  inline bool test_lock_set() const {
+    auto version = __atomic_load_n(&lock_, __ATOMIC_ACQUIRE);
     return (version & lockSet) != 0;
   }
 
   // test whether the version has change, if change, return true
-  inline bool test_lock_version_change(uint32_t old_version) const {
-    auto value = __atomic_load_n(&lock_, __ATOMIC_ACQUIRE);
-    return (old_version != value);
-  }
+  // Below function no use => used in coarsed-grained locking
+  // inline bool test_lock_version_change(uint32_t old_version) const {
+  //   auto value = __atomic_load_n(&lock_, __ATOMIC_ACQUIRE);
+  //   return (old_version != value);
+  // }
 
   inline void get_link_lock() {
     uint32_t new_value = 0;
@@ -698,6 +729,55 @@ public:
     uint32_t v = link_lock_;
     __atomic_store_n(&link_lock_, v & lockMask, __ATOMIC_RELEASE);
   }
+
+  // Fine-grained concurrency control
+  inline bool test_lock_set(uint32_t &version, int lock_pos) const {
+    version =
+        __atomic_load_n(&scale_parameters_[lock_pos].lock_, __ATOMIC_ACQUIRE);
+    return (version & lockSet) != 0;
+  }
+
+  inline bool test_lock_version_change(uint32_t old_version,
+                                       int lock_pos) const {
+    auto value =
+        __atomic_load_n(&scale_parameters_[lock_pos].lock_, __ATOMIC_ACQUIRE);
+    return (old_version != value);
+  }
+
+  inline void get_lock(int lock_pos) {
+    uint32_t new_value = 0;
+    uint32_t old_value = 0;
+    do {
+      while (true) {
+        old_value = __atomic_load_n(&scale_parameters_[lock_pos].lock_,
+                                    __ATOMIC_ACQUIRE);
+        if (!(old_value & lockSet)) {
+          old_value &= lockMask;
+          break;
+        }
+      }
+      new_value = old_value | lockSet;
+    } while (!CAS(&scale_parameters_[lock_pos].lock_, &old_value, new_value));
+  }
+
+  inline bool try_get_lock(int lock_pos) {
+    uint32_t v =
+        __atomic_load_n(&scale_parameters_[lock_pos].lock_, __ATOMIC_ACQUIRE);
+    if (v & lockSet) {
+      return false;
+    }
+    auto old_value = v & lockMask;
+    auto new_value = v | lockSet;
+    return CAS(&scale_parameters_[lock_pos].lock_, &old_value, new_value);
+  }
+
+  inline void release_lock(int lock_pos) {
+    uint32_t v = scale_parameters_[lock_pos].lock_;
+    __atomic_store_n(&scale_parameters_[lock_pos].lock_, v + 1 - lockSet,
+                     __ATOMIC_RELEASE);
+  }
+
+
 
   static void New_from_existing(void **ptr, self_type *old_node) {
     align_zalloc(ptr, sizeof(self_type));
@@ -796,10 +876,22 @@ public:
 
   // Empirical average number of shifts per insert
   double shifts_per_insert() const {
-    if (num_inserts_ == 0) {
+    int total_inserts = 0;
+    long long total_shifts = 0;
+
+    for(int i = 0; i < scale_parameters_size_; ++i){
+      total_inserts += scale_parameters_[i].num_inserts_;
+      total_shifts += scale_parameters_[i].num_shifts_;
+    }
+
+    if (total_inserts == 0) {
       return 0;
     }
-    return num_shifts_ / static_cast<double>(num_inserts_);
+    return total_shifts / static_cast<double>(total_inserts);
+    // if (num_inserts_ == 0) {
+    //   return 0;
+    // }
+    // return num_shifts_ / static_cast<double>(num_inserts_);
   }
 
   // Empirical average number of exponential search iterations per operation
@@ -1253,6 +1345,8 @@ public:
     bitmap_size_ = static_cast<size_t>(std::ceil(data_capacity_ / 64.));
     bitmap_ = new (bitmap_allocator().allocate(bitmap_size_))
         uint64_t[bitmap_size_](); // initialize to all false
+    scale_parameters_size_ = static_cast<size_t>(std::ceil(data_capacity_ / (double)SCALE_FACTOR));
+    align_zalloc(reinterpret_cast<void**>(&scale_parameters_), sizeof(ScaleParameter) * scale_parameters_size_);
 #if ALEX_DATA_NODE_SEP_ARRAYS
     key_slots_ =
         new (key_allocator().allocate(data_capacity_)) T[data_capacity_];
@@ -1272,6 +1366,7 @@ public:
 
     if (num_keys == 0) {
       expansion_threshold_ = data_capacity_;
+      scale_parameters_[0].expansion_threshold_ = data_capacity_;
       contraction_threshold_ = 0;
       for (int i = 0; i < data_capacity_; i++) {
         ALEX_DATA_NODE_KEY_AT(i) = kEndSentinel_;
@@ -1294,9 +1389,12 @@ public:
     for (int i = 0; i < num_keys; i++) {
       int position = this->model_.predict(values[i].first);
       position = std::max<int>(position, last_position + 1);
+      int parameter_pos = position / SCALE_FACTOR;
+      scale_parameters[parameter_pos].num_keys_++;
 
       int positions_remaining = data_capacity_ - position;
       if (positions_remaining < keys_remaining) {
+        scale_parameters[parameter_pos].num_keys_--;
         // fill the rest of the store contiguously
         int pos = data_capacity_ - keys_remaining;
         for (int j = last_position + 1; j < pos; j++) {
@@ -1310,6 +1408,8 @@ public:
           data_slots_[pos] = values[j];
 #endif
           set_bit(pos);
+          parameter_pos = pos / SCALE_FACTOR;
+          scale_parameters[parameter_pos].num_keys_++;
           pos++;
         }
         last_position = pos - 1;
@@ -1337,9 +1437,23 @@ public:
       ALEX_DATA_NODE_KEY_AT(i) = kEndSentinel_;
     }
 
+    
     expansion_threshold_ = std::min(std::max(data_capacity_ * kMaxDensity_,
                                              static_cast<double>(num_keys + 1)),
                                     static_cast<double>(data_capacity_));
+
+    for (int i = 0; i < scale_parameters_size_; ++i) {
+      scale_parameters_[i].expansion_threshold_ =
+          SCALE_FACTOR * kMaxDensity_;
+    }
+
+    auto num_remain = data_capacity_ % SCALE_FACTOR;
+    if (num_remain != 0) {
+      scale_parameters_[scale_parameters_size_ - 1].expansion_threshold_ = std::min(std::max(num_remain * kMaxDensity_,
+                          static_cast<double>(scale_parameters_[scale_parameters_size_-1].num_keys_ + 1)),
+                 static_cast<double>(num_remain));
+    }
+
     contraction_threshold_ = data_capacity_ * kMinDensity_;
     min_key_ = values[0].first;
     max_key_ = values[num_keys - 1].first;
@@ -1376,6 +1490,7 @@ public:
     initialize(num_actual_keys, kMinDensity_);
     if (num_actual_keys == 0) {
       expansion_threshold_ = data_capacity_;
+      scale_parameters_[0].expansion_threshold_ = data_capacity_;
       contraction_threshold_ = 0;
       for (int i = 0; i < data_capacity_; i++) {
         ALEX_DATA_NODE_KEY_AT(i) = kEndSentinel_;
@@ -1398,11 +1513,14 @@ public:
     int keys_remaining = num_keys_;
     const_iterator_type it(node, left);
     for (; it.cur_idx_ < right && !it.is_end(); it++) {
-      int position = this->model_.predict(it.key());
+      int position = this->model_.predict(it.key());      
       position = std::max<int>(position, last_position + 1);
+      int parameter_pos = position / SCALE_FACTOR;
+      scale_parameters_[parameter_pos].num_keys_++;
 
       int positions_remaining = data_capacity_ - position;
       if (positions_remaining < keys_remaining) {
+        scale_parameters[parameter_pos].num_keys_--;
         // fill the rest of the store contiguously
         int pos = data_capacity_ - keys_remaining;
         for (int j = last_position + 1; j < pos; j++) {
@@ -1416,6 +1534,8 @@ public:
           data_slots_[pos] = *it;
 #endif
           set_bit(pos);
+          parameter_pos = pos / SCALE_FACTOR;
+          scale_parameters[parameter_pos].num_keys_++;
         }
         last_position = pos - 1;
         break;
@@ -1443,6 +1563,18 @@ public:
     }
 
     max_key_ = node->max_key_;
+
+    for (int i = 0; i < scale_parameters_size_; ++i) {
+      scale_parameters_[i].expansion_threshold_ =
+          SCALE_FACTOR * kMaxDensity_;
+    }
+
+    auto num_remain = data_capacity_ % SCALE_FACTOR;
+    if (num_remain != 0) {
+      scale_parameters_[scale_parameters_size_ - 1].expansion_threshold_ = std::min(std::max(num_remain * kMaxDensity_,
+                          static_cast<double>(scale_parameters_[scale_parameters_size_-1].num_keys_ + 1)),
+                 static_cast<double>(num_remain));
+    }
 
     expansion_threshold_ =
         std::min(std::max(data_capacity_ * kMaxDensity_,
@@ -1579,24 +1711,41 @@ public:
   }
 
   bool find_payload(const T &key, P *payload, bool *found) {
-    uint32_t version;
-    if (test_lock_set(
-            version)) // Test whether the lock is set and record the version
+    if (test_lock_set()) // Test whether the lock is set and record the version
       return false;
-    num_lookups_++;
     int predicted_pos = predict_position(key);
     // The last key slot with a certain value is guaranteed to be a real key
     // (instead of a gap)
-    int pos = exponential_search_upper_bound(predicted_pos, key) - 1;
+    int cur_parameter_pos;
+    uint32_t version;
+    bool lock_success = true;
+    long long cur_exp_search_iterations = 0;
+    int pos = exponential_search_upper_bound_with_opt_read(predicted_pos, key, cur_parameter_pos, version, lock_success, cur_exp_search_iterations) - 1;
+    if(!lock_success) return false;
+
+    if(pos >= 0 && pos < data_capacity_){
+      int next_parameter_pos = pos / SCALE_FACTOR;
+      if(next_parameter_pos != cur_parameter_pos){
+        if(test_lock_version_change(version, cur_parameter_pos)){
+          return false;
+        }
+        cur_parameter_pos = next_parameter_pos;
+        if(test_lock_set(version, cur_parameter_pos)){
+          return false;
+        }
+      }
+    }
+
     if (!(pos < 0 || !key_equal(ALEX_DATA_NODE_KEY_AT(pos), key))) {
       *payload = get_payload(pos);
       *found = true;
     } else {
       *found = false;
     }
-    if (test_lock_version_change(
-            version)) // Test whether the version is changed or not
+    if(test_lock_set(version, cur_parameter_pos))
       return false;
+    scale_parameters[cur_parameter_pos].num_lookups_++;
+    scale_parameters[cur_parameter_pos].num_exp_search_iterations_ += cur_exp_search_iterations;
     return true;
   }
 
@@ -1652,10 +1801,39 @@ public:
         predict_position(key); // first use model to get prediction
 
     // insert to the right of duplicate keys
+    // need to acquire the lock 
     int pos = exponential_search_upper_bound(predicted_pos, key);
     if (predicted_pos <= pos || check_exists(pos)) {
       return {pos, pos};
     } else {
+      // Place inserted key as close as possible to the predicted position while
+      // maintaining correctness
+      return {std::min(predicted_pos, get_next_filled_position(pos, true) - 1),
+              pos};
+    }
+  }
+
+  std::pair<int, int> find_insert_position_with_lock(const T &key, int& left_lock, int& right_lock, long long& cur_exp_search_iterations) {
+    // insert to the right of duplicate keys
+    // need to acquire the lock 
+    int predicted_pos =
+        predict_position(key); // first use model to get prediction
+    int lock_pos = predicted_pos / SCALE_FACTOR;
+    if(!try_get_lock(lock_pos)){
+      return {-1, -1};
+    }else{
+      left_lock = lock_pos;
+      right_lock = lock_pos;
+    }
+    bool lock_success = true;
+    int pos = exponential_search_upper_bound_with_lock(predicted_pos, key, left_lock, right_lock, lock_success, cur_exp_search_iterations);
+    if(!lock_success){
+      return {-1, -1};
+    }
+    if (predicted_pos <= pos || check_exists(pos)) {
+      return {pos, pos};
+    } else {
+      // (pos < predicted_pos && !check_exists(pos))
       // Place inserted key as close as possible to the predicted position while
       // maintaining correctness
       return {std::min(predicted_pos, get_next_filled_position(pos, true) - 1),
@@ -1733,10 +1911,213 @@ public:
     return binary_search_upper_bound(l, r, key);
   }
 
+
+  // lock [left_lock, right lock] has been acquired
+  //@ pos is the position in primary array
+  bool get_seq_lock(int& left_lock, int& right_lock, int pos) {
+    int lock_pos = pos / SCALE_FACTOR;
+    lock_pos = std::max(0, std::min(lock_pos, scale_parameters_size_ - 1));
+
+    if(lock_pos < left_lock){
+      for(int i = left_lock - 1; i >= lock_pos; i--){
+        if(!try_get_lock(i)){
+          left_lock = i + 1;
+          return false;
+        }
+      }
+      left_lock = lock_pos;
+    }else if (lock_pos > right_lock){
+      for(int i = right_lock + 1, i <= lock_pos; i++){
+        if(!try_get_lock(i)){
+          right_lock = i - 1;
+          return false;
+        }
+      }
+      right_lock = lock_pos;
+    }
+    return true;
+  }
+
+  bool get_range_lock(int& left_lock, int& right_lock, int left_pos, int right_pos) {
+    int left_lock_pos = left_pos / SCALE_FACTOR;
+    int right_lock_pos = right_pos / SCALE_FACTOR;
+    left_lock_pos = std::max(0, std::min(left_lock_pos, scale_parameters_size_ - 1));
+    right_lock_pos = std::max(0, std::min(right_lock_pos, scale_parameters_size_ - 1));
+
+    if(left_lock_pos < left_lock){
+      for(int i = left_lock - 1; i >= left_lock_pos; i--){
+        if(!try_get_lock(i)){
+          left_lock = i + 1;
+          return false;
+        }
+      }
+      left_lock = left_lock_pos;
+    }
+
+    if(right_lock_pos > right_lock){
+      for(int i = right_lock + 1, i <= right_lock_pos; i++){
+        if(!try_get_lock(i)){
+          right_lock = i - 1;
+          return false;
+        }
+      }
+      right_lock = right_lock_pos;
+    }
+
+    return true;
+  }
+  
+  // Release lock in [left_lock, right_lock]
+  void release_seq_lock(int left_lock, int right_lock) {
+     if(right_lock < left_lock || right_lock >= scale_parameters_size_ || left_lock < 0) return;
+
+     for(int i = left_lock; i <= right_lock; ++i){
+       release_lock(i);
+     }
+  }
+
+  template <class K>
+  inline int exponential_search_upper_bound_with_lock(int m, const K &key, int& left_lock, int& right_lock, bool& lock_success, long long& cur_exp_search_iterations) {
+    // Continue doubling the bound until it contains the upper bound. Then use
+    // binary search.
+    int bound = 1;
+    int l, r; // will do binary search in range [l, r)
+    if (key_greater(ALEX_DATA_NODE_KEY_AT(m), key)) {
+      int size = m;
+      while (bound < size){
+        if(!get_seq_lock(left_lock, right_lock, m - bound)){
+          lock_success = false;
+          return -1;
+        }
+        if(key_greater(ALEX_DATA_NODE_KEY_AT(m - bound), key)) {
+          bound *= 2;
+          //num_exp_search_iterations_++;
+          cur_exp_search_iterations++;
+        }else{
+          break;
+        }
+      }
+      l = m - std::min<int>(bound, size);
+      r = m - bound / 2;
+    } else {
+      int size = data_capacity_ - m;
+      while (bound < size){
+        if(!get_seq_lock(left_lock, right_lock, m + bound)){
+          lock_success = false;
+          return -1;
+        }
+
+        if(key_lessequal(ALEX_DATA_NODE_KEY_AT(m + bound), key)) {
+          bound *= 2;
+          // num_exp_search_iterations_++;
+          cur_exp_search_iterations++;          
+        }else{
+          break;
+        }
+      }
+      l = m + bound / 2;
+      r = m + std::min<int>(bound, size);
+    }
+    lock_success = true;
+    return binary_search_upper_bound(l, r, key);
+  }
+
+    template <class K>
+  inline int exponential_search_upper_bound_with_opt_read(int m, const K &key, int& cur_parameter_pos, uint32_t& version, bool& lock_success, long long& cur_exp_search_iterations) {
+    // Continue doubling the bound until it contains the upper bound. Then use
+    // binary search.
+    lock_success = true;
+    int bound = 1;
+    int l, r; // will do binary search in range [l, r)
+    cur_parameter_pos = m / SCALE_FACTOR;
+    if(test_lock_set(version, cur_parameter_pos)){
+      lock_success = false;
+      return -1;
+    }
+
+    if (key_greater(ALEX_DATA_NODE_KEY_AT(m), key)) {
+      int size = m;
+      while (bound < size){
+        int next_parameter_pos = (m - bound) / SCALE_FACTOR;
+        if(next_parameter_pos != cur_parameter_pos){
+          if(test_lock_version_change(version, cur_parameter_pos)){
+            lock_success = false;
+            return -1;
+          }
+          cur_parameter_pos = next_parameter_pos;
+          if(test_lock_set(version, cur_parameter_pos)){
+            lock_success = false;
+            return -1;
+          }
+        }
+        if(key_greater(ALEX_DATA_NODE_KEY_AT(m - bound), key)) {
+          bound *= 2;
+          //num_exp_search_iterations_++;
+          cur_exp_search_iterations++;
+        }else{
+          break;
+        }
+      }
+      l = m - std::min<int>(bound, size);
+      r = m - bound / 2;
+    } else {
+      int size = data_capacity_ - m;
+      while (bound < size){
+        int next_parameter_pos = (m + bound) / SCALE_FACTOR;
+        if(next_parameter_pos != cur_parameter_pos){
+          if(test_lock_version_change(version, cur_parameter_pos)){
+            lock_success = false;
+            return -1;
+          }
+          cur_parameter_pos = next_parameter_pos;
+          if(test_lock_set(version, cur_parameter_pos)){
+            lock_success = false;
+            return -1;
+          }
+        }
+        if(key_lessequal(ALEX_DATA_NODE_KEY_AT(m + bound), key)) {
+          bound *= 2;
+          // num_exp_search_iterations_++;
+          cur_exp_search_iterations++;          
+        }else{
+          break;
+        }
+      }
+      l = m + bound / 2;
+      r = m + std::min<int>(bound, size);
+    }
+    return binary_search_upper_bound(l, r, key, cur_parameter_pos, version, lock_success);
+  }
+
   // Searches for the first position greater than key in range [l, r)
   // https://stackoverflow.com/questions/6443569/implementation-of-c-lower-bound
   // Returns position in range [l, r]
   template <class K>
+  inline int binary_search_upper_bound_with_opt_read(int l, int r, const K &key, int& cur_parameter_pos, uint32_t& version, bool& lock_success) const {
+    while (l < r) {
+      int mid = l + (r - l) / 2;
+      int next_parameter_pos = mid / SCALE_FACTOR;
+      if(next_parameter_pos != cur_parameter_pos){
+        if(test_lock_version_change(version, cur_parameter_pos)){
+          lock_success = false;
+          return -1;
+        }
+        cur_parameter_pos = next_parameter_pos;
+        if(test_lock_set(version, cur_parameter_pos)){
+          lock_success = false;
+          return -1;
+        }
+      }
+      if (key_lessequal(ALEX_DATA_NODE_KEY_AT(mid), key)) {
+        l = mid + 1;
+      } else {
+        r = mid;
+      }
+    }
+    return l;
+  }
+
+   template <class K>
   inline int binary_search_upper_bound(int l, int r, const K &key) const {
     while (l < r) {
       int mid = l + (r - l) / 2;
@@ -1853,6 +2234,48 @@ public:
     return shifts_per_insert() > 100 || expected_avg_shifts_ > 100;
   }
 
+  // get the locks in the whole node, and also set that this node is in a SMO
+  void get_all_locks_in_node() {
+    for (int i = 0; i < scale_parameters_size_; ++i) {
+      get_lock(i);
+    }
+  }
+
+  void release_all_locks_in_node() {
+    for (int i = 0; i < scale_parameters_size_; ++i) {
+      release_lock(i);
+    }
+  }
+
+  void update_all_cost() {
+    int total_inserts = 0;
+    int total_lookups = 0;
+    int total_num_keys = 0;
+    long long total_num_shifts = 0;
+    double total_num_exp_search_iterations = 0;
+    for (int i = 0; i < scale_parameters_size_; ++i) {
+      total_inserts += scale_parameters_[i].num_inserts_;
+      total_lookups += scale_parameters_[i].num_lookups_;
+      total_num_keys += scale_parameters_[i].num_keys_;
+      total_num_shifts += scale_parameters_[i].num_shifts_;
+      total_num_exp_search_iterations += scale_parameters_[i].num_exp_search_iterations_;
+    }
+
+    num_inserts_ += total_inserts;
+    num_lookups_ += total_lookups;
+    num_shifts_ += total_num_shifts;
+    num_exp_search_iterations_ += total_num_exp_search_iterations;
+    num_keys_ = total_num_keys;
+  }
+
+  int total_keys_in_node() {
+    int count = 0;
+    for (int i = 0; i < scale_parameters_size_; i++) {
+      count += scale_parameters_[i].num_keys_;
+    }
+    return count;
+  }
+
   // First value in returned pair is fail flag:
   // 0 if successful insert (possibly with automatic expansion).
   // 1 if no insert because of significant cost deviation.
@@ -1865,67 +2288,132 @@ public:
   // already-existing key.
   // -1 if no insertion.
   std::pair<int, int> insert(const T &key, const P &payload) {
-    // Try to get the exclusive lock
-    uint32_t lock_version;
-    if (!try_get_lock()) {
+    // Test whether the node is in SMO
+    if(test_lock_set()){
       return {4, -1};
     }
 
     // Insert
-    std::pair<int, int> positions = find_insert_position(key);
+    int left_lock = -1, right_lock = -1;
+    long long cur_exp_search_iterations = 0;
+    std::pair<int, int> positions = find_insert_position_with_lock(key, left_lock, right_lock, cur_exp_search_iterations);
+    if(positions.first == -1 && positions.second == -1){
+      release_seq_lock(left_lock, right_lock);
+      return {4, -1}; // lock acquiration fail, need retry
+    }
+
     int upper_bound_pos = positions.second;
     if (!allow_duplicates && upper_bound_pos > 0 &&
         key_equal(ALEX_DATA_NODE_KEY_AT(upper_bound_pos - 1), key)) {
-      release_lock(); // If duplicate, release lock & return
+      release_seq_lock(left_lock, right_lock); // If duplicate, release lock & return
       return {-1, upper_bound_pos - 1};
     }
 
     int insertion_position = positions.first;
+    int parameter_pos;
+    bool reinsert = false;
     if (insertion_position < data_capacity_ &&
         !check_exists(insertion_position)) {
+      parameter_pos = insertion_position / SCALE_FACTOR;
       insert_element_at(key, payload, insertion_position);
     } else {
+      bool success = true;
       insertion_position =
-          insert_using_shifts(key, payload, insertion_position);
+          insert_using_shifts_with_lock(key, payload, insertion_position, left_lock, right_lock, success, parameter_pos);
+      if(!success) {
+        release_seq_lock(left_lock, right_lock);
+        return {4, -1}; // lock acquiration fail, need retry
+      }
+
+      if(insertion_position < 0){
+        // Probbably the array is already full, we need to first do the SMO and then retry
+        // -2 means that the key is inserted fail, need re-insertion
+        if (try_get_lock()) {
+          release_seq_lock(left_lock, right_lock);
+          get_all_locks_in_node();
+          update_all_cost();
+          if (significant_cost_deviation()) {
+            return {1, -2};
+          }
+          if (catastrophic_cost()) {
+            return {2, -2};
+          }
+          if (num_keys_ > max_slots_ * kMinDensity_) {
+            return {3, -2};
+          }
+          // Expand
+          // bool keep_left = is_append_mostly_right();
+          // bool keep_right = is_append_mostly_left();
+          // resize(kMinDensity_, false, keep_left, keep_right);
+          // num_resizes_++;
+          return {5, -2};
+        }
+        return {4, -1};
+      }
     }
 
     // Update stats
-    num_keys_++;
-    num_inserts_++;
+    scale_parameters_[parameter_pos].num_exp_search_iterations_ += cur_exp_search_iterations;
+    scale_parameters_[parameter_pos].num_keys_++;
+    scale_parameters_[parameter_pos].num_inserts_++;
+
     if (key > max_key_) {
-      max_key_ = key;
-      num_right_out_of_bounds_inserts_++;
+      do {
+        auto old_value = load_multiple_type(&max_key_);
+        // if(key > old_value){
+        if (key_greater(key, old_value)) {
+          cas_multiple_type(&max_key_, &old_value, key);
+        }
+      } while ((key > max_key_);
+      num_right_out_of_bounds_inserts_++; // No need for atomicity
     }
+
     if (key < min_key_) {
-      min_key_ = key;
-      num_left_out_of_bounds_inserts_++;
+      do {
+        auto old_value = load_multiple_type(&min_key_);
+        if (key_less(key, old_value)) {
+          cas_multiple_type(&min_key_, &old_value, key);
+        }
+      } while (key < min_key_);
+      num_left_out_of_bounds_inserts_++; // No need for atomicity
     }
 
     // Periodically check for catastrophe
-    if (num_inserts_ % 64 == 0 && catastrophic_cost()) {
-      return {2, -1};
+    if (scale_parameters_[parameter_pos].num_inserts_ % 64 == 0 && catastrophic_cost()) {
+      if (try_get_lock()) {
+        release_seq_lock(left_lock, right_lock);
+        get_all_locks_in_node();
+        update_all_cost();
+        return {2, -1};
+      }
     }
 
     // Check if node is full (based on expansion_threshold)
-    if (num_keys_ >= expansion_threshold_) {
-      if (significant_cost_deviation()) {
-        return {1, -1};
+    if scale_parameters_[parameter_pos].num_keys_ >= scale_parameters_[parameter_pos].expansion_threshold_) {
+      int total_keys = total_keys_in_node();
+      if ((total_keys > expansion_threshold_) && try_get_lock()) {
+        release_seq_lock(left_lock, right_lock);
+        get_all_locks_in_node();
+        update_all_cost();
+        if (significant_cost_deviation()) {
+          return {1, -1};
+        }
+        if (catastrophic_cost()) {
+          return {2, -1};
+        }
+        if (num_keys_ > max_slots_ * kMinDensity_) {
+          return {3, -1};
+        }
+        // Expand
+        // bool keep_left = is_append_mostly_right();
+        // bool keep_right = is_append_mostly_left();
+        // resize(kMinDensity_, false, keep_left, keep_right);
+        // num_resizes_++;
+        return {5, -1};
       }
-      if (catastrophic_cost()) {
-        return {2, -1};
-      }
-      if (num_keys_ > max_slots_ * kMinDensity_) {
-        return {3, -1};
-      }
-      // Expand
-      // bool keep_left = is_append_mostly_right();
-      // bool keep_right = is_append_mostly_left();
-      // resize(kMinDensity_, false, keep_left, keep_right);
-      // num_resizes_++;
-      return {5, -1};
     }
 
-    release_lock(); // release lock & return
+    release_seq_lock(left_lock, right_lock);
     return {0, insertion_position};
   }
 
@@ -2068,6 +2556,7 @@ public:
 
     if (num_keys_ == 0) {
       initialize(num_keys_, kMinDensity_);
+      scale_parameters_[0].expansion_threshold_ = data_capacity_;
       expansion_threshold_ = data_capacity_;
       contraction_threshold_ = 0;
       return;
@@ -2079,6 +2568,9 @@ public:
         static_cast<size_t>(std::ceil(new_data_capacity / 64.));
     auto new_bitmap = new (bitmap_allocator().allocate(new_bitmap_size))
         uint64_t[new_bitmap_size](); // initialize to all false
+    auto new_scale_parameters_size = static_cast<size_t>(std::ceil(new_data_capacity / (double)SCALE_FACTOR));
+    ScaleParameter* new_scale_parameters; 
+    align_zalloc(reinterpret_cast<void**>(&new_scale_parameters), sizeof(ScaleParameter) * new_scale_parameters_size);
 #if ALEX_DATA_NODE_SEP_ARRAYS
     T *new_key_slots =
         new (key_allocator().allocate(new_data_capacity)) T[new_data_capacity];
@@ -2119,10 +2611,14 @@ public:
     const_iterator_type it(old_node, 0);
     for (; it.cur_idx_ < data_capacity_ && !it.is_end(); it++) {
       int position = this->model_.predict(it.key());
+      // int predict_pos = std::max<int>(std::min<int>(position, new_data_capacity - 1), 0);
       position = std::max<int>(position, last_position + 1);
+      int parameter_pos = position / SCALE_FACTOR;
+      new_scale_parameters[parameter_pos].num_keys_++;
 
       int positions_remaining = new_data_capacity - position;
       if (positions_remaining < keys_remaining) {
+        new_scale_parameters[parameter_pos].num_keys_--;
         // fill the rest of the store contiguously
         int pos = new_data_capacity - keys_remaining;
         for (int j = last_position + 1; j < pos; j++) {
@@ -2140,6 +2636,8 @@ public:
           new_data_slots[pos] = *it;
 #endif
           set_bit(new_bitmap, pos);
+          parameter_pos = pos / SCALE_FACTOR;
+          new_scale_parameters[parameter_pos].num_keys_++;
         }
         last_position = pos - 1;
         break;
@@ -2183,7 +2681,7 @@ public:
     #endif
         bitmap_allocator().deallocate(bitmap_, bitmap_size_);
     */
-
+    scale_parameters_ = new_scale_parameters;
     data_capacity_ = new_data_capacity;
     bitmap_size_ = new_bitmap_size;
 #if ALEX_DATA_NODE_SEP_ARRAYS
@@ -2199,6 +2697,19 @@ public:
                           static_cast<double>(num_keys_ + 1)),
                  static_cast<double>(data_capacity_));
     contraction_threshold_ = data_capacity_ * kMinDensity_;
+
+    scale_parameters_size_ = static_cast<size_t>(std::ceil(data_capacity_ / (double)SCALE_FACTOR));
+    for (int i = 0; i < scale_parameters_size_; ++i) {
+      scale_parameters_[i].expansion_threshold_ =
+          SCALE_FACTOR * kMaxDensity_;
+    }
+
+    auto num_remain = data_capacity_ % SCALE_FACTOR;
+    if (num_remain != 0) {
+      scale_parameters_[scale_parameters_size_ - 1].expansion_threshold_ = std::min(std::max(num_remain * kMaxDensity_,
+                          static_cast<double>(scale_parameters_[scale_parameters_size_-1].num_keys_ + 1)),
+                 static_cast<double>(num_remain));
+    }
   }
 
   inline bool is_append_mostly_right() const {
@@ -2263,6 +2774,42 @@ public:
     }
   }
 
+  int insert_using_shifts_with_lock(const T &key, P payload, int pos, int& left, int& right, bool& success, int& parameter_pos) {
+    // Find the closest gap
+    int gap_pos = closest_gap_with_lock(pos, left, right, success);
+    if(!success) return -1;
+    if(gap_pos < 0) return -1;
+    parameter_pos = gap_pos / SCALE_FACTOR;
+    set_bit(gap_pos);
+    if (gap_pos >= pos) {
+      for (int i = gap_pos; i > pos; i--) {
+#if ALEX_DATA_NODE_SEP_ARRAYS
+        key_slots_[i] = key_slots_[i - 1];
+        payload_slots_[i] = payload_slots_[i - 1];
+#else
+        data_slots_[i] = data_slots_[i - 1];
+#endif
+      }
+      insert_element_at(key, payload, pos);
+      scale_parameters_[parameter_pos].num_shifts_ += gap_pos - pos;
+      //num_shifts_ += gap_pos - pos;
+      return pos;
+    } else {
+      for (int i = gap_pos; i < pos - 1; i++) {
+#if ALEX_DATA_NODE_SEP_ARRAYS
+        key_slots_[i] = key_slots_[i + 1];
+        payload_slots_[i] = payload_slots_[i + 1];
+#else
+        data_slots_[i] = data_slots_[i + 1];
+#endif
+      }
+      insert_element_at(key, payload, pos - 1);
+      scale_parameters_[parameter_pos].num_shifts_ += pos - gap_pos - 1;
+      //num_shifts_ += pos - gap_pos - 1;
+      return pos - 1;
+    }
+  }
+
 #if ALEX_USE_LZCNT
   // Returns position of closest gap to pos
   // Returns pos if pos is a gap
@@ -2278,8 +2825,8 @@ public:
       // blocks
       int left_bitmap_pos = 0;
       int right_bitmap_pos = ((data_capacity_ - 1) >> 6); // inclusive
-      int max_left_bitmap_offset = bitmap_pos - left_bitmap_pos;
-      int max_right_bitmap_offset = right_bitmap_pos - bitmap_pos;
+      int max_left_bitmap_offset = bitmap_pos - left_bitmap_pos; // max distance to left
+      int max_right_bitmap_offset = right_bitmap_pos - bitmap_pos; // max distance to right
       int max_bidirectional_bitmap_offset =
           std::min<int>(max_left_bitmap_offset, max_right_bitmap_offset);
       int bitmap_distance = 1;
@@ -2287,7 +2834,7 @@ public:
         uint64_t left_bitmap_data = bitmap_[bitmap_pos - bitmap_distance];
         uint64_t right_bitmap_data = bitmap_[bitmap_pos + bitmap_distance];
         if (left_bitmap_data != static_cast<uint64_t>(-1) &&
-            right_bitmap_data != static_cast<uint64_t>(-1)) {
+            right_bitmap_data != static_cast<uint64_t>(-1)) { // both are not full
           int left_gap_pos = ((bitmap_pos - bitmap_distance + 1) << 6) -
                              static_cast<int>(_lzcnt_u64(~left_bitmap_data)) -
                              1;
@@ -2299,7 +2846,7 @@ public:
           } else {
             return right_gap_pos;
           }
-        } else if (left_bitmap_data != static_cast<uint64_t>(-1)) {
+        } else if (left_bitmap_data != static_cast<uint64_t>(-1)) { // left not full
           int left_gap_pos = ((bitmap_pos - bitmap_distance + 1) << 6) -
                              static_cast<int>(_lzcnt_u64(~left_bitmap_data)) -
                              1;
@@ -2320,7 +2867,7 @@ public:
           } else {
             return left_gap_pos;
           }
-        } else if (right_bitmap_data != static_cast<uint64_t>(-1)) {
+        } else if (right_bitmap_data != static_cast<uint64_t>(-1)) { // right not full
           int right_gap_pos = ((bitmap_pos + bitmap_distance) << 6) +
                               static_cast<int>(_tzcnt_u64(~right_bitmap_data));
           if (right_gap_pos < data_capacity_) {
@@ -2368,6 +2915,7 @@ public:
       }
       return -1;
     } else {
+      // NO need to lock other areas
       // search within block of 64 positions
       uint64_t bitmap_data = bitmap_[bitmap_pos];
       int closest_right_gap_distance = 64;
@@ -2397,6 +2945,195 @@ public:
             bit_pos - (63 - static_cast<int>(_lzcnt_u64(bitmap_left_gaps)));
       } else if (bitmap_pos > 0) {
         // look in the next block to the left
+        closest_left_gap_distance =
+            bit_pos + static_cast<int>(_lzcnt_u64(~bitmap_[bitmap_pos - 1])) +
+            1;
+      }
+
+      if (closest_right_gap_distance < closest_left_gap_distance &&
+          pos + closest_right_gap_distance < data_capacity_) {
+        return pos + closest_right_gap_distance;
+      } else {
+        return pos - closest_left_gap_distance;
+      }
+    }
+  }
+
+  int closest_gap_with_lock(int pos, int& left, int& right, bool& success) const {
+    pos = std::min(pos, data_capacity_ - 1);
+    int bitmap_pos = pos >> 6;
+    int bit_pos = pos - (bitmap_pos << 6);
+    // First acquire the lock belong to this bitmap
+    success = get_range_lock(left, right, bitmap_pos * 64, (bitmap_pos + 1) * 64 - 1);
+    if(!success) {
+      return -1;
+    }
+
+    if (bitmap_[bitmap_pos] == static_cast<uint64_t>(-1) ||
+        (bitmap_pos == bitmap_size_ - 1 &&
+         _mm_popcnt_u64(bitmap_[bitmap_pos]) ==
+             data_capacity_ - ((bitmap_size_ - 1) << 6))) {
+      // no gaps in this block of 64 positions, start searching in adjacent
+      // blocks
+      int left_bitmap_pos = 0;
+      int right_bitmap_pos = ((data_capacity_ - 1) >> 6); // inclusive
+      int max_left_bitmap_offset = bitmap_pos - left_bitmap_pos; // max distance to left
+      int max_right_bitmap_offset = right_bitmap_pos - bitmap_pos; // max distance to right
+      int max_bidirectional_bitmap_offset =
+          std::min<int>(max_left_bitmap_offset, max_right_bitmap_offset);
+      int bitmap_distance = 1;
+      while (bitmap_distance <= max_bidirectional_bitmap_offset) {
+        // First acquire the lock before accessing the bitmap
+        success = get_range_lock(left, right, (bitmap_pos - bitmap_distance) * 64, (bitmap_pos - bitmap_distance + 1) * 64 - 1);
+        if(!success) {
+          return -1;
+        }
+        success = get_range_lock(left, right, (bitmap_pos + bitmap_distance) * 64, (bitmap_pos + bitmap_distance + 1) * 64 - 1);
+        if(!success) {
+          return -1;
+        }
+
+        uint64_t left_bitmap_data = bitmap_[bitmap_pos - bitmap_distance];
+        uint64_t right_bitmap_data = bitmap_[bitmap_pos + bitmap_distance];
+        if (left_bitmap_data != static_cast<uint64_t>(-1) &&
+            right_bitmap_data != static_cast<uint64_t>(-1)) { // both are not full
+          int left_gap_pos = ((bitmap_pos - bitmap_distance + 1) << 6) -
+                             static_cast<int>(_lzcnt_u64(~left_bitmap_data)) -
+                             1;
+          int right_gap_pos = ((bitmap_pos + bitmap_distance) << 6) +
+                              static_cast<int>(_tzcnt_u64(~right_bitmap_data));
+          if (pos - left_gap_pos <= right_gap_pos - pos ||
+              right_gap_pos >= data_capacity_) {
+            return left_gap_pos;
+          } else {
+            return right_gap_pos;
+          }
+        } else if (left_bitmap_data != static_cast<uint64_t>(-1)) { // left not full
+          int left_gap_pos = ((bitmap_pos - bitmap_distance + 1) << 6) -
+                             static_cast<int>(_lzcnt_u64(~left_bitmap_data)) -
+                             1;
+          // also need to check next block to the right
+          if (bit_pos > 32 && bitmap_pos + bitmap_distance + 1 < bitmap_size_){
+            success = get_range_lock(left, right, (bitmap_pos + bitmap_distance + 1) * 64, (bitmap_pos + bitmap_distance + 2) * 64 - 1);
+            if(!success) {
+              return -1;
+            }
+
+            if(bitmap_[bitmap_pos + bitmap_distance + 1] !=
+                  static_cast<uint64_t>(-1)) {
+              int right_gap_pos =
+                  ((bitmap_pos + bitmap_distance + 1) << 6) +
+                  static_cast<int>(
+                      _tzcnt_u64(~bitmap_[bitmap_pos + bitmap_distance + 1]));
+              if (pos - left_gap_pos <= right_gap_pos - pos ||
+                  right_gap_pos >= data_capacity_) {
+                return left_gap_pos;
+              } else {
+                return right_gap_pos;
+              }
+            } 
+          } 
+          return left_gap_pos;
+        } else if (right_bitmap_data != static_cast<uint64_t>(-1)) { // right not full
+          int right_gap_pos = ((bitmap_pos + bitmap_distance) << 6) +
+                              static_cast<int>(_tzcnt_u64(~right_bitmap_data));
+          if (right_gap_pos < data_capacity_) {
+            // also need to check next block to the left
+            if (bit_pos < 32 && bitmap_pos - bitmap_distance > 0){
+              success = get_range_lock(left, right, (bitmap_pos - bitmap_distance - 1) * 64, (bitmap_pos - bitmap_distance) * 64 - 1);
+              if(!success) {
+                return -1;
+              }
+
+              if(bitmap_[bitmap_pos - bitmap_distance - 1] !=
+                    static_cast<uint64_t>(-1)){
+                int left_gap_pos =
+                    ((bitmap_pos - bitmap_distance) << 6) -
+                    static_cast<int>(
+                        _lzcnt_u64(~bitmap_[bitmap_pos - bitmap_distance - 1])) -
+                    1;
+                if (pos - left_gap_pos <= right_gap_pos - pos ||
+                    right_gap_pos >= data_capacity_) {
+                  return left_gap_pos;
+                } else {
+                  return right_gap_pos;
+                }
+              }
+            }
+            return right_gap_pos;
+          }
+        }
+        bitmap_distance++;
+      }
+      if (max_left_bitmap_offset > max_right_bitmap_offset) {
+        for (int i = bitmap_pos - bitmap_distance; i >= left_bitmap_pos; i--) {
+          success = get_range_lock(left, right, i * 64, (i + 1) * 64 - 1);
+          if(!success) {
+            return -1;
+          }
+          if (bitmap_[i] != static_cast<uint64_t>(-1)) {
+            return ((i + 1) << 6) - static_cast<int>(_lzcnt_u64(~bitmap_[i])) -
+                   1;
+          }
+        }
+      } else {
+        for (int i = bitmap_pos + bitmap_distance; i <= right_bitmap_pos; i++) {
+          success = get_range_lock(left, right, i * 64, (i + 1) * 64 - 1);
+          if(!success) {
+            return -1;
+          }
+          if (bitmap_[i] != static_cast<uint64_t>(-1)) {
+            int right_gap_pos =
+                (i << 6) + static_cast<int>(_tzcnt_u64(~bitmap_[i]));
+            if (right_gap_pos >= data_capacity_) {
+              return -1;
+            } else {
+              return right_gap_pos;
+            }
+          }
+        }
+      }
+      return -1;
+    } else {
+      // NO need to lock other areas
+      // search within block of 64 positions
+      uint64_t bitmap_data = bitmap_[bitmap_pos];
+      int closest_right_gap_distance = 64;
+      int closest_left_gap_distance = 64;
+      // Logically gaps to the right of pos, in the bitmap these are gaps to the
+      // left of pos's bit
+      // This covers the case where pos is a gap
+      // For example, if pos is 3, then bitmap '10101101' -> bitmap_right_gaps
+      // '01010000'
+      uint64_t bitmap_right_gaps = ~(bitmap_data | ((1ULL << bit_pos) - 1));
+      if (bitmap_right_gaps != 0) {
+        closest_right_gap_distance =
+            static_cast<int>(_tzcnt_u64(bitmap_right_gaps)) - bit_pos;
+      } else if (bitmap_pos + 1 < bitmap_size_) {
+        // look in the next block to the right
+        success = get_range_lock(left, right, (bitmap_pos + 1) * 64, (bitmap_pos + 2) * 64 - 1);
+        if(!success) {
+          return -1;
+        }
+
+        closest_right_gap_distance =
+            64 + static_cast<int>(_tzcnt_u64(~bitmap_[bitmap_pos + 1])) -
+            bit_pos;
+      }
+      // Logically gaps to the left of pos, in the bitmap these are gaps to the
+      // right of pos's bit
+      // For example, if pos is 3, then bitmap '10101101' -> bitmap_left_gaps
+      // '00000010'
+      uint64_t bitmap_left_gaps = (~bitmap_data) & ((1ULL << bit_pos) - 1);
+      if (bitmap_left_gaps != 0) {
+        closest_left_gap_distance =
+            bit_pos - (63 - static_cast<int>(_lzcnt_u64(bitmap_left_gaps)));
+      } else if (bitmap_pos > 0) {
+        // look in the next block to the left
+        success = get_range_lock(left, right, (bitmap_pos - 1) * 64, bitmap_pos * 64 - 1);
+        if(!success) {
+          return -1;
+        }
         closest_left_gap_distance =
             bit_pos + static_cast<int>(_lzcnt_u64(~bitmap_[bitmap_pos - 1])) +
             1;
