@@ -1927,7 +1927,7 @@ public:
       }
       left_lock = lock_pos;
     }else if (lock_pos > right_lock){
-      for(int i = right_lock + 1, i <= lock_pos; i++){
+      for(int i = right_lock + 1; i <= lock_pos; i++){
         if(!try_get_lock(i)){
           right_lock = i - 1;
           return false;
