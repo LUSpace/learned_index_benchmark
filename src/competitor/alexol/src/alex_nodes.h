@@ -1390,7 +1390,7 @@ public:
       int position = this->model_.predict(values[i].first);
       position = std::max<int>(position, last_position + 1);
       int parameter_pos = position / SCALE_FACTOR;
-      scale_parameters[parameter_pos].num_keys_++;
+      scale_parameters_[parameter_pos].num_keys_++;
 
       int positions_remaining = data_capacity_ - position;
       if (positions_remaining < keys_remaining) {
