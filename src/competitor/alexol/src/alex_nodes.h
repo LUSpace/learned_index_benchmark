@@ -2189,9 +2189,9 @@ public:
   // Use recursion for implementation
   inline int range_scan_by_size(const T &key, uint32_t to_scan, V *result) {
   RETRY:
-    uint32_t version;
-    if (test_lock_set(version))
-      goto RETRY;
+  //   uint32_t version;
+  //   if (test_lock_set(version))
+  //     goto RETRY;
 
     int predicted_pos = predict_position(key); // First locate this position
 
@@ -2205,8 +2205,8 @@ public:
       scanned++;
     }
 
-    if (test_lock_version_change(version))
-      goto RETRY;
+    // if (test_lock_version_change(version))
+    //   goto RETRY;
 
     auto next_leaf = this->next_leaf_;
     if (scanned < to_scan && next_leaf) {
