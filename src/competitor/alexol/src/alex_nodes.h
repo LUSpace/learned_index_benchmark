@@ -1394,7 +1394,7 @@ public:
 
       int positions_remaining = data_capacity_ - position;
       if (positions_remaining < keys_remaining) {
-        scale_parameters[parameter_pos].num_keys_--;
+        scale_parameters_[parameter_pos].num_keys_--;
         // fill the rest of the store contiguously
         int pos = data_capacity_ - keys_remaining;
         for (int j = last_position + 1; j < pos; j++) {
