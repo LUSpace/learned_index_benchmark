@@ -322,7 +322,7 @@ public:
  */
 template <class T, class P, class Compare = AlexCompare,
           class Alloc = std::allocator<std::pair<T, P>>,
-          bool allow_duplicates = false>
+          bool allow_duplicates = true>
 class AlexDataNode : public AlexNode<T, P> {
 public:
   typedef std::pair<T, P> V;
@@ -1578,7 +1578,7 @@ public:
     }
   }
 
-  bool find_payload(const T &key, P *payload, bool *found) {
+  bool find_payload(const T &key, P *payload, int &num) {
     uint32_t version;
     if (test_lock_set(
             version)) // Test whether the lock is set and record the version
@@ -1589,14 +1589,35 @@ public:
     // (instead of a gap)
     int pos = exponential_search_upper_bound(predicted_pos, key) - 1;
     if (!(pos < 0 || !key_equal(ALEX_DATA_NODE_KEY_AT(pos), key))) {
-      *payload = get_payload(pos);
-      *found = true;
+      num = 1;
+      int idx = pos - 1;
+      while (idx >= 0 && key_equal(ALEX_DATA_NODE_KEY_AT(idx), key) &&
+             check_exists(idx)) {
+        ++num;
+        --idx;
+      }
+
+      if (num == 1) {
+        *payload = get_payload(pos);
+      } else {
+        P *return_list = new P[num];
+        idx = 0;
+        while (idx < num) {
+          return_list[idx] = get_payload(pos - idx);
+          ++idx;
+        }
+        *payload = reinterpret_cast<P>(return_list);
+      }
     } else {
-      *found = false;
+      num = 0;
     }
-    if (test_lock_version_change(
-            version)) // Test whether the version is changed or not
+    if (test_lock_version_change(version)) {
+      if (num > 1) {
+        P *return_list = reinterpret_cast<P *>(*payload);
+        delete[] return_list;
+      }
       return false;
+    }
     return true;
   }
 
@@ -2493,7 +2514,7 @@ public:
     }
     int pos = upper_bound(key);
 
-    if (pos == 0 || !key_equal(ALEX_DATA_NODE_KEY_AT(pos - 1), key)){
+    if (pos == 0 || !key_equal(ALEX_DATA_NODE_KEY_AT(pos - 1), key)) {
       count = 0;
       release_lock();
       return true;
@@ -2522,7 +2543,7 @@ public:
     // if (num_keys_ < contraction_threshold_) {
     //   resize(kMaxDensity_);
     //   num_resizes_++;
-    // } 
+    // }
 
     count = num_erased;
     release_lock();
