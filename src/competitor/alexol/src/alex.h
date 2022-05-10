@@ -972,6 +972,38 @@ private:
   /*** Bulk loading ***/
 
 public:
+  // return the size of vector
+  void process_duplicate(const V values[], int num_keys,
+                         vector<V> &processed_vector) {
+    int i = 0;
+    while (i < num_keys) {
+      // access next consecutive keys
+      int j = i + 1;
+      if (j >= num_keys) {
+        processed_vector.push_back(values[i]);
+        break;
+      }
+
+      if (values[j].first == values[i].first) {
+        ValueList<P> *link_value = new ValueList<P>(values[i].second, nullptr);
+        ValueList<P> *head_value =
+            new ValueList<P>(values[j].second, link_value);
+        ++j;
+        while (j < num_keys && values[j].first == values[i].first) {
+          link_value = head_value;
+          head_value = new ValueList<P>(values[j].second, link_value);
+          ++j;
+        }
+        processed_vector.push_back(
+            {values[i].first, reinterpret_cast<P>(head_value) | MSB64});
+        i = j;
+      } else {
+        processed_vector.push_back(values[i]);
+        ++i;
+      }
+    }
+  }
+
   // values should be the sorted array of key-payload pairs.
   // The number of elements should be num_keys.
   // The index must be empty when calling this method.
@@ -981,13 +1013,19 @@ public:
     }
     delete_node(root_node_); // delete the empty root node from constructor
 
-    stats_.num_keys = num_keys;
+    // Preprocessing the values array, dupkicate keys => one key
+    std::vector<V> processed_vector;
+    process_duplicate(values, num_keys, processed_vector);
+    V *new_values = processed_vector.data();
+    int new_num_keys = processed_vector.size();
+
+    stats_.num_keys = new_num_keys;
 
     // Build temporary root model, which outputs a CDF in the range [0, 1]
     root_node_ =
         new (model_node_allocator().allocate(1)) model_node_type(0, allocator_);
-    T min_key = values[0].first;
-    T max_key = values[num_keys - 1].first;
+    T min_key = new_values[0].first;
+    T max_key = newvalues[new_num_keys - 1].first;
     root_node_->model_.a_ = 1.0 / (max_key - min_key);
     root_node_->model_.b_ = -1.0 * min_key * root_node_->model_.a_;
 
@@ -996,16 +1034,16 @@ public:
 
     // Compute cost of root node
     LinearModel<T> root_data_node_model;
-    data_node_type::build_model(values, num_keys, &root_data_node_model,
+    data_node_type::build_model(new_values, new_num_keys, &root_data_node_model,
                                 params_.approximate_model_computation);
     DataNodeStats stats;
     root_node_->cost_ = data_node_type::compute_expected_cost(
-        values, num_keys, data_node_type::kInitDensity_,
+        new_values, new_num_keys, data_node_type::kInitDensity_,
         params_.expected_insert_frac, &root_data_node_model,
         params_.approximate_cost_computation, &stats);
 
     // Recursively bulk load
-    bulk_load_node(values, num_keys, root_node_, num_keys,
+    bulk_load_node(new_values, new_num_keys, root_node_, num_keys,
                    static_cast<double>(min_key), static_cast<double>(max_key),
                    &root_data_node_model);
 
