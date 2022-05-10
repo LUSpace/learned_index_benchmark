@@ -1025,7 +1025,7 @@ public:
     root_node_ =
         new (model_node_allocator().allocate(1)) model_node_type(0, allocator_);
     T min_key = new_values[0].first;
-    T max_key = newvalues[new_num_keys - 1].first;
+    T max_key = new_values[new_num_keys - 1].first;
     root_node_->model_.a_ = 1.0 / (max_key - min_key);
     root_node_->model_.b_ = -1.0 * min_key * root_node_->model_.a_;
 
@@ -1043,7 +1043,7 @@ public:
         params_.approximate_cost_computation, &stats);
 
     // Recursively bulk load
-    bulk_load_node(new_values, new_num_keys, root_node_, num_keys,
+    bulk_load_node(new_values, new_num_keys, root_node_, new_num_keys,
                    static_cast<double>(min_key), static_cast<double>(max_key),
                    &root_data_node_model);
 
