@@ -307,6 +307,17 @@ public:
   }
 };
 
+template <class P> class ValueList {
+public:
+  ValueList(P value, ValueList *next) {
+    value_ = value;
+    next_ = next;
+  }
+
+  P value_;
+  ValueList *next_;
+};
+
 /*
  * Functions are organized into different sections:
  * - Constructors and destructors
@@ -332,6 +343,7 @@ public:
   typedef typename Alloc::template rebind<P>::other payload_alloc_type;
   typedef typename Alloc::template rebind<V>::other value_alloc_type;
   typedef typename Alloc::template rebind<uint64_t>::other bitmap_alloc_type;
+  typedef ValueList<P> value_type;
 
   const Compare &key_less_;
   const Alloc &allocator_;
@@ -1578,7 +1590,7 @@ public:
     }
   }
 
-  bool find_payload(const T &key, P *payload, bool *found) {
+  bool find_payload(const T &key, P *payload, int &num) {
     uint32_t version;
     if (test_lock_set(
             version)) // Test whether the lock is set and record the version
@@ -1589,14 +1601,41 @@ public:
     // (instead of a gap)
     int pos = exponential_search_upper_bound(predicted_pos, key) - 1;
     if (!(pos < 0 || !key_equal(ALEX_DATA_NODE_KEY_AT(pos), key))) {
-      *payload = get_payload(pos);
-      *found = true;
+      // Infer whether there are multiple keys
+      if (ALEX_DATA_NODE_PAYLOAD_AT(pos) & MSB64) {
+        value_type *value_list = reinterpret_cast<value_type *>(
+            ALEX_DATA_NODE_PAYLOAD_AT(pos) & addrHide);
+        value_type *value_head = value_list;
+        num = 0;
+        while (value_list) {
+          ++num;
+          value_list = value_list->next_;
+        }
+        P *return_list = new P[num];
+        value_list = value_head;
+        int idx = 0;
+        while (value_list) {
+          return_list[idx] = value_list->value_;
+          ++idx;
+          value_list = value_list->next_;
+        }
+        *payload = reinterpret_cast<P>(return_list);
+      } else {
+        *payload = get_payload(pos);
+        num = 1;
+      }
     } else {
-      *found = false;
+      num = 0;
     }
-    if (test_lock_version_change(
-            version)) // Test whether the version is changed or not
+
+    if (test_lock_version_change(version)) {
+      if (num > 1) {
+        P *return_list = reinterpret_cast<P *>(*payload);
+        delete[] return_list;
+      }
       return false;
+    }
+
     return true;
   }
 
@@ -1874,10 +1913,30 @@ public:
     // Insert
     std::pair<int, int> positions = find_insert_position(key);
     int upper_bound_pos = positions.second;
-    if (!allow_duplicates && upper_bound_pos > 0 &&
+
+    // Check whether it allows duplicates
+    if (upper_bound_pos > 0 &&
         key_equal(ALEX_DATA_NODE_KEY_AT(upper_bound_pos - 1), key)) {
-      release_lock(); // If duplicate, release lock & return
-      return {-1, upper_bound_pos - 1};
+      if (allow_duplicates) {
+        // Change the value to pointer to a linked list
+        value_type *new_value;
+        if (ALEX_DATA_NODE_PAYLOAD_AT(upper_bound_pos - 1) & MSB64) {
+          new_value = new value_type(
+              payload,
+              ALEX_DATA_NODE_PAYLOAD_AT(upper_bound_pos - 1) & addrHide);
+        } else {
+          // Create consecutive
+          value_type *old_value = new value_type(
+              ALEX_DATA_NODE_PAYLOAD_AT(upper_bound_pos - 1), nullptr);
+          new_value = new value_type(payload, old_value);
+        }
+        ALEX_DATA_NODE_PAYLOAD_AT(upper_bound_pos - 1) = new_value | MSB64;
+        release_lock();
+        return {0, upper_bound_pos - 1};
+      } else {
+        release_lock(); // If duplicate, release lock & return
+        return {-1, upper_bound_pos - 1};
+      }
     }
 
     int insertion_position = positions.first;
@@ -2493,14 +2552,29 @@ public:
     }
     int pos = upper_bound(key);
 
-    if (pos == 0 || !key_equal(ALEX_DATA_NODE_KEY_AT(pos - 1), key)){
+    if (pos == 0 || !key_equal(ALEX_DATA_NODE_KEY_AT(pos - 1), key)) {
       count = 0;
       release_lock();
       return true;
     }
 
-    // Erase preceding positions until we reach a key with smaller value
     int num_erased = 0;
+    // delete all value_list
+    if (ALEX_DATA_NODE_PAYLOAD_AT(pos - 1) & MSB64) {
+      value_type *value_list = reinterpret_cast<value_type *>(
+          ALEX_DATA_NODE_PAYLOAD_AT(pos - 1) & addrHide);
+      value_type *prev_value;
+      while (value_list) {
+        ++num_erased;
+        prev_value = value_list;
+        value_list = value_list->next_;
+        delete prev_value;
+      }
+    } else {
+      num_erased = 1;
+    }
+
+    // Erase preceding positions until we reach a key with smaller value
     T next_key;
     if (pos == data_capacity_) {
       next_key = kEndSentinel_;
@@ -2522,7 +2596,7 @@ public:
     // if (num_keys_ < contraction_threshold_) {
     //   resize(kMaxDensity_);
     //   num_resizes_++;
-    // } 
+    // }
 
     count = num_erased;
     release_lock();

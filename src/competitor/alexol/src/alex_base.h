@@ -53,11 +53,10 @@ typedef unsigned __int32 uint32_t;
 
 //#define DEBUG_OUTPUT
 #if defined(DEBUG_OUTPUT)
-#define PRINT_DEBUG(format, ...) printf(format,##__VA_ARGS__)
+#define PRINT_DEBUG(format, ...) printf(format, ##__VA_ARGS__)
 #else
 #define PRINT_DEBUG(format, ...)
 #endif
-
 
 #include "util.h"
 
@@ -66,12 +65,12 @@ namespace alexol {
 const uint32_t lockSet = ((uint32_t)1 << 31);
 const uint32_t lockMask = ((uint32_t)1 << 31) - 1;
 const int counterMask = (1 << 19) - 1;
+const uint64_t MSB64 = 1ULL << 63;
+const uint64_t addrHide = (1ULL << 63) - 1;
 
-void align_alloc(void **ptr, size_t size){
-  posix_memalign(ptr, 64, size);
-}
+void align_alloc(void **ptr, size_t size) { posix_memalign(ptr, 64, size); }
 
-void align_zalloc(void **ptr, size_t size){
+void align_zalloc(void **ptr, size_t size) {
   posix_memalign(ptr, 64, size);
   memset(*ptr, 0, size);
 }
@@ -79,15 +78,13 @@ void align_zalloc(void **ptr, size_t size){
 /*** Linear model and model builder ***/
 
 // Forward declaration
-template <class T>
-class LinearModelBuilder;
-
+template <class T> class LinearModelBuilder;
 
 class StringOutput {
 public:
   std::string s_;
   StringOutput() {}
-  StringOutput(std::string s) {s_ = s;}
+  StringOutput(std::string s) { s_ = s; }
   ~StringOutput() {
 #if defined(DEBUG_OUTPUT)
     std::cout << "Thread " + std::to_string(omp_get_thread_num()) + s_ + "\n";
@@ -101,15 +98,14 @@ public:
 };
 
 // Linear regression model
-template <class T>
-class LinearModel {
- public:
-  double a_ = 0;  // slope
-  double b_ = 0;  // intercept
+template <class T> class LinearModel {
+public:
+  double a_ = 0; // slope
+  double b_ = 0; // intercept
 
   LinearModel() = default;
   LinearModel(double a, double b) : a_(a), b_(b) {}
-  explicit LinearModel(const LinearModel& other) : a_(other.a_), b_(other.b_) {}
+  explicit LinearModel(const LinearModel &other) : a_(other.a_), b_(other.b_) {}
 
   void expand(double expansion_factor) {
     a_ *= expansion_factor;
@@ -125,12 +121,11 @@ class LinearModel {
   }
 };
 
-template <class T>
-class LinearModelBuilder {
- public:
-  LinearModel<T>* model_;
+template <class T> class LinearModelBuilder {
+public:
+  LinearModel<T> *model_;
 
-  explicit LinearModelBuilder<T>(LinearModel<T>* model) : model_(model) {}
+  explicit LinearModelBuilder<T>(LinearModel<T> *model) : model_(model) {}
 
   inline void add(T x, int y) {
     count_++;
@@ -173,7 +168,7 @@ class LinearModelBuilder {
     }
   }
 
- private:
+private:
   int count_ = 0;
   long double x_sum_ = 0;
   long double y_sum_ = 0;
@@ -189,10 +184,10 @@ class LinearModelBuilder {
 
 struct AlexCompare {
   template <class T1, class T2>
-  bool operator()(const T1& x, const T2& y) const {
-    static_assert(
-        std::is_arithmetic<T1>::value && std::is_arithmetic<T2>::value,
-        "Comparison types must be numeric.");
+  bool operator()(const T1 &x, const T2 &y) const {
+    static_assert(std::is_arithmetic<T1>::value &&
+                      std::is_arithmetic<T2>::value,
+                  "Comparison types must be numeric.");
     return x < y;
   }
 };
@@ -251,7 +246,7 @@ struct SampleDataNodeStats {
 // Accumulates stats that are used in the cost model, based on the actual vs
 // predicted position of a key
 class StatAccumulator {
- public:
+public:
   virtual ~StatAccumulator() = default;
   virtual void accumulate(int actual_position, int predicted_position) = 0;
   virtual double get_stat() = 0;
@@ -261,7 +256,7 @@ class StatAccumulator {
 // Mean log error represents the expected number of exponential search
 // iterations when doing a lookup
 class ExpectedSearchIterationsAccumulator : public StatAccumulator {
- public:
+public:
   void accumulate(int actual_position, int predicted_position) override {
     cumulative_log_error_ +=
         std::log2(std::abs(predicted_position - actual_position) + 1);
@@ -269,7 +264,8 @@ class ExpectedSearchIterationsAccumulator : public StatAccumulator {
   }
 
   double get_stat() override {
-    if (count_ == 0) return 0;
+    if (count_ == 0)
+      return 0;
     return cumulative_log_error_ / count_;
   }
 
@@ -278,14 +274,14 @@ class ExpectedSearchIterationsAccumulator : public StatAccumulator {
     count_ = 0;
   }
 
- public:
+public:
   double cumulative_log_error_ = 0;
   int count_ = 0;
 };
 
 // Mean shifts represents the expected number of shifts when doing an insert
 class ExpectedShiftsAccumulator : public StatAccumulator {
- public:
+public:
   explicit ExpectedShiftsAccumulator(int data_capacity)
       : data_capacity_(data_capacity) {}
 
@@ -296,7 +292,8 @@ class ExpectedShiftsAccumulator : public StatAccumulator {
   // Therefore, we track n^2/4.
   void accumulate(int actual_position, int) override {
     if (actual_position > last_position_ + 1) {
-      long long dense_region_length = last_position_ - dense_region_start_idx_ + 1;
+      long long dense_region_length =
+          last_position_ - dense_region_start_idx_ + 1;
       num_expected_shifts_ += (dense_region_length * dense_region_length) / 4;
       dense_region_start_idx_ = actual_position;
     }
@@ -305,9 +302,11 @@ class ExpectedShiftsAccumulator : public StatAccumulator {
   }
 
   double get_stat() override {
-    if (count_ == 0) return 0;
+    if (count_ == 0)
+      return 0;
     // first need to accumulate statistics for current packed region
-    long long dense_region_length = last_position_ - dense_region_start_idx_ + 1;
+    long long dense_region_length =
+        last_position_ - dense_region_start_idx_ + 1;
     long long cur_num_expected_shifts =
         num_expected_shifts_ + (dense_region_length * dense_region_length) / 4;
     return cur_num_expected_shifts / static_cast<double>(count_);
@@ -320,17 +319,17 @@ class ExpectedShiftsAccumulator : public StatAccumulator {
     count_ = 0;
   }
 
- public:
+public:
   int last_position_ = -1;
   int dense_region_start_idx_ = 0;
   long long num_expected_shifts_ = 0;
   int count_ = 0;
-  int data_capacity_ = -1;  // capacity of node
+  int data_capacity_ = -1; // capacity of node
 };
 
 // Combines ExpectedSearchIterationsAccumulator and ExpectedShiftsAccumulator
 class ExpectedIterationsAndShiftsAccumulator : public StatAccumulator {
- public:
+public:
   ExpectedIterationsAndShiftsAccumulator() = default;
   explicit ExpectedIterationsAndShiftsAccumulator(int data_capacity)
       : data_capacity_(data_capacity) {}
@@ -340,7 +339,8 @@ class ExpectedIterationsAndShiftsAccumulator : public StatAccumulator {
         std::log2(std::abs(predicted_position - actual_position) + 1);
 
     if (actual_position > last_position_ + 1) {
-      long long dense_region_length = last_position_ - dense_region_start_idx_ + 1;
+      long long dense_region_length =
+          last_position_ - dense_region_start_idx_ + 1;
       num_expected_shifts_ += (dense_region_length * dense_region_length) / 4;
       dense_region_start_idx_ = actual_position;
     }
@@ -350,18 +350,21 @@ class ExpectedIterationsAndShiftsAccumulator : public StatAccumulator {
   }
 
   double get_stat() override {
-    assert(false);  // this should not be used
+    assert(false); // this should not be used
     return 0;
   }
 
   double get_expected_num_search_iterations() {
-    if (count_ == 0) return 0;
+    if (count_ == 0)
+      return 0;
     return cumulative_log_error_ / count_;
   }
 
   double get_expected_num_shifts() {
-    if (count_ == 0) return 0;
-    long long dense_region_length = last_position_ - dense_region_start_idx_ + 1;
+    if (count_ == 0)
+      return 0;
+    long long dense_region_length =
+        last_position_ - dense_region_start_idx_ + 1;
     long long cur_num_expected_shifts =
         num_expected_shifts_ + (dense_region_length * dense_region_length) / 4;
     return cur_num_expected_shifts / static_cast<double>(count_);
@@ -375,13 +378,13 @@ class ExpectedIterationsAndShiftsAccumulator : public StatAccumulator {
     count_ = 0;
   }
 
- public:
+public:
   double cumulative_log_error_ = 0;
   int last_position_ = -1;
   int dense_region_start_idx_ = 0;
   long long num_expected_shifts_ = 0;
   int count_ = 0;
-  int data_capacity_ = -1;  // capacity of node
+  int data_capacity_ = -1; // capacity of node
 };
 
 /*** Miscellaneous helpers ***/
@@ -400,7 +403,8 @@ inline int pow_2_round_up(int x) {
 // https://stackoverflow.com/questions/994593/how-to-do-an-integer-log2-in-c
 inline int log_2_round_down(int x) {
   int res = 0;
-  while (x >>= 1) ++res;
+  while (x >>= 1)
+    ++res;
   return res;
 }
 
@@ -408,10 +412,10 @@ inline int log_2_round_down(int x) {
 class CPUID {
   uint32_t regs[4];
 
- public:
+public:
   explicit CPUID(unsigned i, unsigned j) {
 #ifdef _WIN32
-    __cpuidex((int*)regs, (int)i, (int)j);
+    __cpuidex((int *)regs, (int)i, (int)j);
 #else
     asm volatile("cpuid"
                  : "=a"(regs[0]), "=b"(regs[1]), "=c"(regs[2]), "=d"(regs[3])
@@ -419,14 +423,14 @@ class CPUID {
 #endif
   }
 
-  const uint32_t& EAX() const { return regs[0]; }
-  const uint32_t& EBX() const { return regs[1]; }
-  const uint32_t& ECX() const { return regs[2]; }
-  const uint32_t& EDX() const { return regs[3]; }
+  const uint32_t &EAX() const { return regs[0]; }
+  const uint32_t &EBX() const { return regs[1]; }
+  const uint32_t &ECX() const { return regs[2]; }
+  const uint32_t &EDX() const { return regs[3]; }
 };
 
 // https://en.wikipedia.org/wiki/CPUID#EAX=7,_ECX=0:_Extended_Features
 bool cpu_supports_bmi() {
   return static_cast<bool>(CPUID(7, 0).EBX() & (1 << 3));
 }
-}
+} // namespace alexol

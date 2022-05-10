@@ -1323,14 +1323,14 @@ public:
   // Directly returns a pointer to the payload found through find(key)
   // This avoids the overhead of creating an iterator
   // Returns null pointer if there is no exact match of the key
-  bool get_payload(const T &key, P *payload) const {
+  int get_payload(const T &key, P *payload) const {
     EpochGuard guard;
     do {
       data_node_type *leaf = get_leaf(key);
-      bool found = false;
-      auto ret_flag = leaf->find_payload(key, payload, &found);
+      int num = 0;
+      auto ret_flag = leaf->find_payload(key, payload, num);
       if (ret_flag == true)
-        return found; // ret_flag == true means no concurrency conlict occurs
+        return num; // ret_flag == true means no concurrency conlict occurs
     } while (true);
   }
 
@@ -2634,7 +2634,7 @@ public:
     thread_local int erase_counter(0);
     int old_counter = erase_counter;
     erase_counter = (erase_counter + num_erased) & counterMask;
-    if(old_counter > erase_counter){
+    if (old_counter > erase_counter) {
       SUB(&stats_.num_keys, (1 << 19) - 1);
     }
 
