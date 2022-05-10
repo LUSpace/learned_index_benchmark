@@ -333,7 +333,7 @@ public:
  */
 template <class T, class P, class Compare = AlexCompare,
           class Alloc = std::allocator<std::pair<T, P>>,
-          bool allow_duplicates = false>
+          bool allow_duplicates = true>
 class AlexDataNode : public AlexNode<T, P> {
 public:
   typedef std::pair<T, P> V;
