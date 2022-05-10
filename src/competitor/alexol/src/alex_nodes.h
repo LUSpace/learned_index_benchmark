@@ -1649,7 +1649,13 @@ public:
     // (instead of a gap)
     int pos = exponential_search_upper_bound(predicted_pos, key) - 1;
     if (!(pos < 0 || !key_equal(ALEX_DATA_NODE_KEY_AT(pos), key))) {
-      ALEX_DATA_NODE_PAYLOAD_AT(pos) = payload;
+      if (ALEX_DATA_NODE_PAYLOAD_AT(pos) & MSB64) {
+        value_type *value_list = reinterpret_cast<value_type *>(
+            ALEX_DATA_NODE_PAYLOAD_AT(pos) & addrHide);
+        value_list->value_ = payload;
+      } else {
+        ALEX_DATA_NODE_PAYLOAD_AT(pos) = payload;
+      }
       *updated = true;
     } else {
       *updated = false;
