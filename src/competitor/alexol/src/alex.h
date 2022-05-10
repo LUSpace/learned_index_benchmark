@@ -974,7 +974,7 @@ private:
 public:
   // return the size of vector
   void process_duplicate(const V values[], int num_keys,
-                         vector<V> &processed_vector) {
+                         std::vector<V> &processed_vector) {
     int i = 0;
     while (i < num_keys) {
       // access next consecutive keys
