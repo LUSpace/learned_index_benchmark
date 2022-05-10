@@ -1929,14 +1929,16 @@ public:
         if (ALEX_DATA_NODE_PAYLOAD_AT(upper_bound_pos - 1) & MSB64) {
           new_value = new value_type(
               payload,
-              ALEX_DATA_NODE_PAYLOAD_AT(upper_bound_pos - 1) & addrHide);
+              reinterpret_cast<value_type *>(
+                  ALEX_DATA_NODE_PAYLOAD_AT(upper_bound_pos - 1) & addrHide));
         } else {
           // Create consecutive
           value_type *old_value = new value_type(
               ALEX_DATA_NODE_PAYLOAD_AT(upper_bound_pos - 1), nullptr);
           new_value = new value_type(payload, old_value);
         }
-        ALEX_DATA_NODE_PAYLOAD_AT(upper_bound_pos - 1) = new_value | MSB64;
+        ALEX_DATA_NODE_PAYLOAD_AT(upper_bound_pos - 1) =
+            reinterpret_cast<P>(new_value) | MSB64;
         release_lock();
         return {0, upper_bound_pos - 1};
       } else {
