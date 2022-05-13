@@ -27,7 +27,7 @@ public:
 
 private:
   alexol::Alex<KEY_TYPE, PAYLOAD_TYPE, alexol::AlexCompare,
-               std::allocator<std::pair<KEY_TYPE, PAYLOAD_TYPE>>, false>
+               std::allocator<std::pair<KEY_TYPE, PAYLOAD_TYPE>>, true>
       index;
 };
 
