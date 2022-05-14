@@ -136,12 +136,7 @@ public:
             exit(0);
         }
 
-        if (!data_shift) {
-            tbb::parallel_sort(keys, keys + table_size);
-            auto last = std::unique(keys, keys + table_size);
-            table_size = last - keys;
-            std::shuffle(keys, keys + table_size, gen);
-        }
+        std::shuffle(keys, keys + table_size, gen);
 
         init_table_size = init_table_ratio * table_size;
         std::cout << "Table size is " << table_size << ", Init table size is " << init_table_size << std::endl;
@@ -266,9 +261,6 @@ public:
         size_t sample_counter = 0, insert_counter = init_table_size;
 
         size_t rest_key_num = table_size - init_table_size;
-        auto unique_init_table_size = init_table_size;
-        auto tail = unique_data(&keys[0], unique_init_table_size, &keys[init_table_size], rest_key_num);
-        table_size = tail - keys;
 
         if (workload_shift_test) {
             read_ratio = 1 - write_ratio_end;
