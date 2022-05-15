@@ -1070,6 +1070,7 @@ private:
   void bulk_load_node(const V values[], int num_keys, AlexNode<T, P> *&node,
                       int total_keys, double min_limit, double max_limit,
                       const LinearModel<T> *data_node_model = nullptr) {
+    std::cout << "Begin: num_keys: " << num_keys << std::endl;
     // T debug_key = 68052112994;
     //  Automatically convert to data node when it is impossible to be better
     //  than current cost
@@ -1199,6 +1200,7 @@ private:
       delete_node(node);
       node = data_node;
     }
+    std::cout << "End: num_keys: " << num_keys << std::endl;
   }
 
   // Caller needs to set the level, duplication factor, and neighbor pointers of
