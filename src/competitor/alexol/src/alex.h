@@ -976,6 +976,7 @@ public:
   // The number of elements should be num_keys.
   // The index must be empty when calling this method.
   void bulk_load(const V values[], int num_keys) {
+    std::cout << "start the bulk loading" << std::endl;
     if (stats_.num_keys > 0 || num_keys <= 0) {
       return;
     }
@@ -1016,9 +1017,12 @@ public:
           stats.num_shifts;
     }
 
+    std::cout << "start creating the supperoot" << std::endl;
+
     create_superroot();
     update_superroot_key_domain();
     link_all_data_nodes();
+    std::cout << "end the bulk loading" << std::endl;
   }
 
 private:
