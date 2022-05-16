@@ -999,12 +999,13 @@ public:
     LinearModel<T> root_data_node_model;
     data_node_type::build_model(values, num_keys, &root_data_node_model,
                                 params_.approximate_model_computation);
+    std::cout << "Start computing expected cost" << std::endl;
     DataNodeStats stats;
     root_node_->cost_ = data_node_type::compute_expected_cost(
         values, num_keys, data_node_type::kInitDensity_,
         params_.expected_insert_frac, &root_data_node_model,
         params_.approximate_cost_computation, &stats);
-
+    std::cout << "End computing expected cost" << std::endl;
     // Recursively bulk load
     bulk_load_node(values, num_keys, root_node_, num_keys,
                    static_cast<double>(min_key), static_cast<double>(max_key),
