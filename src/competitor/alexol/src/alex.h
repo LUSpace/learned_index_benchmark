@@ -114,7 +114,7 @@ public:
   struct DerivedParams {
     // The defaults here assume the default max node size of 16MB
     int max_fanout = 1 << 21; // assumes 8-byte pointers
-    int max_data_node_slots = (1 << 18) / sizeof(V);
+    int max_data_node_slots = (1 << 19) / sizeof(V);
   };
   DerivedParams derived_params_;
 
@@ -976,7 +976,6 @@ public:
   // The number of elements should be num_keys.
   // The index must be empty when calling this method.
   void bulk_load(const V values[], int num_keys) {
-    std::cout << "start the bulk loading" << std::endl;
     if (stats_.num_keys > 0 || num_keys <= 0) {
       return;
     }
@@ -999,13 +998,11 @@ public:
     LinearModel<T> root_data_node_model;
     data_node_type::build_model(values, num_keys, &root_data_node_model,
                                 params_.approximate_model_computation);
-    std::cout << "Start computing expected cost" << std::endl;
     DataNodeStats stats;
     root_node_->cost_ = data_node_type::compute_expected_cost(
         values, num_keys, data_node_type::kInitDensity_,
         params_.expected_insert_frac, &root_data_node_model,
         params_.approximate_cost_computation, &stats);
-    std::cout << "End computing expected cost" << std::endl;
     // Recursively bulk load
     bulk_load_node(values, num_keys, root_node_, num_keys,
                    static_cast<double>(min_key), static_cast<double>(max_key),
@@ -1018,12 +1015,9 @@ public:
           stats.num_shifts;
     }
 
-    std::cout << "start creating the supperoot" << std::endl;
-
     create_superroot();
     update_superroot_key_domain();
     link_all_data_nodes();
-    std::cout << "end the bulk loading" << std::endl;
   }
 
 private:
@@ -1071,7 +1065,7 @@ private:
   void bulk_load_node(const V values[], int num_keys, AlexNode<T, P> *&node,
                       int total_keys, double min_limit, double max_limit,
                       const LinearModel<T> *data_node_model = nullptr) {
-    std::cout << "Begin: num_keys: " << num_keys << std::endl;
+    // std::cout << "Begin: num_keys: " << num_keys << std::endl;
     // T debug_key = 68052112994;
     //  Automatically convert to data node when it is impossible to be better
     //  than current cost
@@ -1201,7 +1195,7 @@ private:
       delete_node(node);
       node = data_node;
     }
-    std::cout << "End: num_keys: " << num_keys << std::endl;
+    // std::cout << "End: num_keys: " << num_keys << std::endl;
   }
 
   // Caller needs to set the level, duplication factor, and neighbor pointers of

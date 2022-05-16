@@ -37,11 +37,8 @@ void alexolInterface<KEY_TYPE, PAYLOAD_TYPE>::bulk_load(
   index.set_max_model_node_size(
       1 << 24); // (22,15,66M) (22,16,89M) (22,17,91M) (22,18,81M) (23,17,92M)
                 // (21,17,92M) (20,17,92M)
-  index.set_max_data_node_size(1 << 18);
-  std::cout << "start alex bulkload" << std::endl;
-  std::cout << "num = " << num << std::endl;
+  index.set_max_data_node_size(1 << 19);
   index.bulk_load(key_value, (int)num);
-  std::cout << "end alex bulkload" << std::endl;
 }
 
 template <class KEY_TYPE, class PAYLOAD_TYPE>

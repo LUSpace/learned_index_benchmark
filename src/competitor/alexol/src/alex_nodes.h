@@ -378,7 +378,7 @@ public:
   double contraction_threshold_ =
       0; // contract after m_num_keys is < this number
   static constexpr int kDefaultMaxDataNodeBytes_ =
-      1 << 18; // by default, maximum data node size is 256KB
+      1 << 19; // by default, maximum data node size is 256KB
   int max_slots_ =
       kDefaultMaxDataNodeBytes_ /
       sizeof(V); // cannot expand beyond this number of key/data slots
